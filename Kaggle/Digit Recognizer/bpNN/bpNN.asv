@@ -85,7 +85,7 @@ if DEBUG == 1
 else
     pred(pred == 10) = 0; % Remap 10 back to 0 since our labels need to start from 1
     % write the prediction into file
-    result = [[1:28000]',pred];
+    result = [[1:28000];pred]';
     
     filename = 'result.csv';
     fid = fopen(filename, 'w');
