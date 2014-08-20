@@ -11,8 +11,7 @@
 clear ; close all; clc
 
 addpath(genpath('../lib'));
-DEBUG = 0;
-
+DEBUG = 1;
 
 trainData = csvread('../data/train.csv',1,0);
 trainLabels = trainData(:,1);             % size 42000 x 1      
@@ -35,6 +34,8 @@ if DEBUG == 1   % for DEBUG, use 30% data in training data as test
 else
     testData = csvread('../data/test.csv',1,0);
 end
+
+% PCA/ZCA whitening does not improve. result 93.92
 
 % STEP 1 : Build and Train the Neural Network
 

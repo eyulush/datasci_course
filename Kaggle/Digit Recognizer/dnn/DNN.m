@@ -10,15 +10,17 @@
 clear ; close all; clc
 
 addpath(genpath('../lib'));
-DEBUG = 0;
+DEBUG = 1;  % if DEBUG, the formal result will not be produced, otherwise, result.csv generated.
 
 % define a currPhrase as 
 % 1 - training 1st hidden layer autoencoder
 % 2 - training 2nd hidden layer autoencoder
-% 3 - training output layer
+% 3 - training output layer, maybe to get an result
 % 4 - fine tuning
-% 5 - output real test result
-currPhrase = 5;
+currPhrase = 4;
+
+% flag for split training data for validation
+validFlag = 0;
 
 % load the data
 trainData = csvread('../data/train.csv',1,0);
@@ -31,6 +33,17 @@ trainData = trainData/255;              % mapping to [0-1]
 numClasses = 10;          % 10 labels, from 1 to 10   
                                       % (note that we have mapped "0" to label 10)
                                       
+% parameters
+currAe1Iter = 0;
+currAe2Iter = 0;
+currAe4Iter = 0;
+ 
+stepAe1Iter = 200;
+stepAe2Iter = 5;
+stepAe4Iter = 200;
+
+
+
 % try to load or init parameters
 if exist('saves','dir') ~= 7
     mkdir('saves');
@@ -39,18 +52,11 @@ end
 if exist('saves\dnn_parameters.mat','file')  == 2
     % load parameter, including
     % hiddenSizeL1,hiddenSizeL2, currIter, aeTheta1
-    load('saves\dnn_parameters.mat');
-    if stepAe1Iter == 10
-        stepAe1Iter = 30;
-    end    
+    load('saves\dnn_parameters.mat'); 
 else
     hiddenSizeL1 = 200;    % Layer 1 Hidden Size
     hiddenSizeL2 = 200;    % Layer 2 Hidden Size
-    currAe1Iter = 0;
-    stepAe1Iter = 10;
-    currAe2Iter = 0;
-    stepAe2Iter = 200;
-    save('saves/dnn_parameters.mat','hiddenSizeL1','hiddenSizeL2','currAe1Iter','stepAe1Iter','currAe2Iter','stepAe2Iter');
+    save('saves/dnn_parameters.mat','hiddenSizeL1','hiddenSizeL2');
         
     ae1Theta = initializeParameters(hiddenSizeL1, inputSize);
     ae2Theta = initializeParameters(hiddenSizeL2, hiddenSizeL1); 
@@ -64,7 +70,7 @@ else
     save('saves/dnn_parameters.mat','sparsityParam','lambda','beta','-append');
 end
 
-if DEBUG == 1   % for DEBUG, use 30% data in training data as test
+if validFlag == 1   % for DEBUG, use 30% data in training data as test
     propRatio = 0.7; 
     numCases= round(numCases*propRatio);
     
@@ -81,9 +87,23 @@ end
 % sparseAutoencoderCost and feedforward
 trainData = trainData';
 testData = testData';
-                                 
-% STEP 1 : 1st layer autoencoder training
-if currPhrase == 1 || currPhrase == 5
+
+% remove the whitening operation
+% if DEBUG == 1 &&  exist('saves\whitenData.mat','file')  == 2
+%     load('saves\whitenData.mat');
+% else
+%     % extra data preprocessing, zca whitening
+%     [pcaWhitenData,U] = pca_whitening([trainData,testData],1,0);
+%     zcaWhitenData = U*pcaWhitenData;
+%     trainData = zcaWhitenData(:,1:numCases);
+%     testData = zcaWhitenData(:,numCases+1:end);
+%     if DEBUG == 1
+%         save('saves\whitenData.mat','trainData','testData');
+%     end
+% end
+
+% STEP 1 : 1st layer autoesncoder training
+if currPhrase == 1 || DEBUG == 0
     options.Method = 'lbfgs'; % Here, we use L-BFGS to optimize our cost
                           % function. Generally, for minFunc to work, you
                           % need a function pointer with two outputs: the
@@ -117,7 +137,7 @@ if currPhrase == 1 || currPhrase == 5
     testFeatures = testFeaturesL1;
 end
 
-if currPhrase == 2 || currPhrase == 5
+if currPhrase == 2 || DEBUG == 0
     options.Method = 'lbfgs'; % Here, we use L-BFGS to optimize our cost
                           % function. Generally, for minFunc to work, you
                           % need a function pointer with two outputs: the
@@ -153,12 +173,19 @@ end
 
 
 % STEP 3: Train the softmax classifier
-if currPhrase == 3 || currPhrase == 5
-    trainFeatures = [trainFeaturesL1;trainFeaturesL2];
-    testFeatures = [testFeaturesL1;testFeaturesL2];
+
+% remove this combining hidden layer features
+if currPhrase == 3
+     trainFeatures = [trainFeaturesL1;trainFeaturesL2];
+     testFeatures = [testFeaturesL1;testFeaturesL2];
 end
 
-softmax_lambda = 1e-5;       % weight decay parameter       
+if currPhrase == 4
+     trainFeatures = trainFeaturesL2;
+     testFeatures = testFeaturesL2;
+end
+
+softmax_lambda = 1e-4;       % weight decay parameter       
 softmax_maxIter = 400;
 
 options.maxIter = softmax_maxIter;
@@ -166,25 +193,70 @@ softmaxModel = softmaxTrain(size(trainFeatures,1), numClasses, softmax_lambda, .
                             trainFeatures, trainLabels, options);  
 
 % STEP 4: fine tuning
+if currPhrase == 4
+    % Initialize the stack using the parameters learned
+    stack = cell(2,1);
+    stack{1}.w = reshape(ae1Theta(1:hiddenSizeL1*inputSize), ...
+                     hiddenSizeL1, inputSize);
+    stack{1}.b = ae1Theta(2*hiddenSizeL1*inputSize+1:2*hiddenSizeL1*inputSize+hiddenSizeL1);
+    stack{2}.w = reshape(ae2Theta(1:hiddenSizeL2*hiddenSizeL1), ...
+                     hiddenSizeL2, hiddenSizeL1);
+    stack{2}.b = ae1Theta(2*hiddenSizeL2*hiddenSizeL1+1:2*hiddenSizeL2*hiddenSizeL1+hiddenSizeL2);
 
-% STEP 4: Testing with test data
+    % Initialize the parameters for the deep model
+    [stackparams, netconfig] = stack2params(stack);
+    stackedAETheta = [softmaxModel.optTheta(:) ; stackparams ];
+
+    if exist('saves/stackedAEOptTheta.mat','file') == 2
+        load('saves/stackedAEOptTheta.mat');
+    else
+        stackedAEOptTheta = stackedAETheta;
+        if DEBUG == 1
+            save('saves/stackedAEOptTheta.mat', 'stackedAEOptTheta');
+        end
+    end
+    
+    % Training
+    options = struct;
+    options.Method = 'lbfgs';
+    options.maxIter = stepAe4Iter;
+    options.display = 'on';
+
+    [stackedAEOptTheta, cost] =  minFunc(@(p)stackedAECost(p,inputSize,hiddenSizeL2,...
+                         numClasses, netconfig,1e-4, trainData, trainLabels),...
+                        stackedAEOptTheta,options);
+                    
+    save('saves/stackedAEOptTheta.mat', 'stackedAEOptTheta','-append');    
+    
+    currAe4Iter = currAe4Iter + stepAe4Iter;
+    save('saves/dnn_parameters.mat','currAe4Iter','-append');  
+end
+
+% STEP 5: Testing with test data
 % inputData is testFeatures
-[pred] = softmaxPredict(softmaxModel, testFeatures);    
+if currPhrase < 4
+    [pred] = softmaxPredict(softmaxModel, testFeatures);    
+else
+    [pred] = stackedAEPredict(stackedAEOptTheta, inputSize, hiddenSizeL2, ...
+                          numClasses, netconfig, testData);
+end
 
-if DEBUG == 1
+if validFlag == 1
     testAccurancy = 100*mean(pred(:) == testLabels(:)); 
         
     fprintf('Test Accuracy: %f%%\n', testAccurancy);
     save('saves/dnn_parameters.mat','testAccurancy','-append');
 else
-    pred(pred == 10) = 0; % Remap 10 back to 0 since our labels need to start from 1
-    % write the prediction into file
-    result = [[1:28000];pred]';
+    if currPhrase > 2
+        pred(pred == 10) = 0; % Remap 10 back to 0 since our labels need to start from 1
+        % write the prediction into file
+        result = [[1:28000];pred]';
     
-    filename = 'result.csv';
-    fid = fopen(filename, 'w');
-    fprintf(fid, 'ImageId,Label\n');
-    fclose(fid);
+        filename = 'result.csv';
+        fid = fopen(filename, 'w');
+        fprintf(fid, 'ImageId,Label\n');
+        fclose(fid);
 
-    dlmwrite(filename, result, '-append');
+        dlmwrite(filename, result, '-append');
+    end
 end
